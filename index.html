@@ -73,6 +73,8 @@
   }
   .detail ul { list-style: none; padding: 0; margin: 0; }
   .detail li { padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .detail li.ing { cursor: pointer; min-height: 44px; -webkit-user-select: none; user-select: none; }
+  .detail li.ing.done { text-decoration: line-through; opacity: 0.45; }
   .detail h3 { font-size: 24px; margin: 24px 0 8px; }
   .detail h4 { font-size: 20px; margin: 18px 0 4px; color: var(--mutedText); }
   ol.steps { padding-left: 1.6em; margin: 0; }
@@ -405,6 +407,7 @@ function start() {
 
   // ---------- thumbnails: only rows on screen, fetched in small batches ----------
   var thumbCache = {}, thumbQueue = [], thumbTimer = null;
+  var crossedOff = {};
   var observer = ("IntersectionObserver" in window) ? new IntersectionObserver(function (entries) {
     entries.forEach(function (e) {
       if (!e.isIntersecting) { return; }
@@ -607,7 +610,16 @@ function start() {
       var t = (i.rawText || i.name || "").trim(); // same line the app shows (RecipeDetailView)
       if (!t) { return; }
       if (i.isSectionHeader) { left.appendChild(ul); ul = el("ul"); left.appendChild(el("h4", null, t)); }
-      else { ul.appendChild(el("li", null, t)); }
+      else {
+        // Tap to cross off as it's used, like the app's recipe page (CrossedOffIngredientsStore):
+        // kept in memory only, so it lasts while the page is open and is never written to iCloud.
+        var li = el("li", "ing", t), key = recipe.recordName + "|" + (i.id || t);
+        if (crossedOff[key]) { li.className += " done"; }
+        li.onclick = (function (k, node) { return function () {
+          if (crossedOff[k]) { delete crossedOff[k]; node.className = "ing"; } else { crossedOff[k] = true; node.className = "ing done"; }
+        }; })(key, li);
+        ul.appendChild(li);
+      }
     });
     left.appendChild(ul);
 
