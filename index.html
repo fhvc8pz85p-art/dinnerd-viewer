@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dinnerd Viewer Test</title>
+<!--
+  Feasibility test for the read-only Dinnerd kitchen viewer (old iPad first, HomeView later).
+  Reads Dinnerd's iCloud data with CloudKit JS 2, Apple's official web access:
+  https://developer.apple.com/documentation/cloudkitjs
+  - setUpAuth / whenUserSignsIn: Apple Account sign-in.
+  - privateCloudDatabase and sharedCloudDatabase: own and household data.
+  - fetchAllRecordZones + fetchRecordZoneChanges: reads whole zones, no query indexes needed.
+  Reading the record layout NSPersistentCloudKitContainer writes (CD_ prefixes) is NOT an
+  official Apple procedure; it is the closest documented route. Read-only: this page never saves.
+-->
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 20px -apple-system, Helvetica, sans-serif; margin: 24px; background: #fff; color: #111; }
+  @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }
+  #status { margin: 16px 0; }
+  li { padding: 6px 0; }
+  .muted { opacity: 0.6; }
+  .error { color: #c00; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Dinnerd Viewer Test</h1>
+<div id="sign-in-button"></div>
+<div id="sign-out-button"></div>
+<div id="status">Starting…</div>
+<h2 id="mine-h" hidden>My recipes</h2><ul id="mine"></ul>
+<h2 id="shared-h" hidden>Shared with me</h2><ul id="shared"></ul>
+
+<script src="https://cdn.apple-cloudkit.com/ck/2/CloudKit.js"></script>
+<script>
+"use strict";
+
+// Set in CloudKit Console: Dinnerd's container, API Access, new API token.
+var API_TOKEN = "PASTE_API_TOKEN_HERE";
+
+var statusEl = document.getElementById("status");
+function say(text, isError) {
+  statusEl.textContent = text;
+  statusEl.className = isError ? "error" : "";
+}
+function showError(where, err) {
+  var msg = (err && (err.ckErrorCode || err.serverErrorCode || err.reason || err.message)) || String(err);
+  say(where + ": " + msg, true);
+}
+
+window.addEventListener("cloudkitloaded", function () {
+  CloudKit.configure({
+    containers: [{
+      containerIdentifier: "iCloud.com.jasonyohman.recipeapp",
+      apiTokenAuth: {
+        apiToken: API_TOKEN,
+        persist: true, // keep the iPad signed in between visits
+        signInButton: { id: "sign-in-button", theme: "black" },
+        signOutButton: { id: "sign-out-button", theme: "black" }
+      },
+      environment: "production" // TestFlight data; use "development" for Xcode builds
+    }]
+  });
+  var container = CloudKit.getDefaultContainer();
+
+  function waitForSignIn() {
+    say("Tap Sign in with Apple to see your recipes.");
+    container.whenUserSignsIn().then(loadAll).catch(function (e) { showError("Sign-in", e); });
+  }
+
+  container.setUpAuth().then(function (user) {
+    if (user) { loadAll(); } else { waitForSignIn(); }
+  }).catch(function (e) { showError("Setup", e); });
+
+  container.whenUserSignsOut().then(function () {
+    document.getElementById("mine").innerHTML = "";
+    document.getElementById("shared").innerHTML = "";
+    waitForSignIn();
+  });
+
+  function loadAll() {
+    say("Loading…");
+    Promise.all([
+      loadDatabase(container.privateCloudDatabase, "mine"),
+      loadDatabase(container.sharedCloudDatabase, "shared")
+    ]).then(function (counts) {
+      say("Done. " + counts[0] + " of my recipes, " + counts[1] + " shared.");
+    }).catch(function (e) { showError("Loading", e); });
+  }
+
+  // Reads every zone in one database, keeping only recipe and version records.
+  function loadDatabase(db, listId) {
+    return db.fetchAllRecordZones().then(function (res) {
+      if (res.hasErrors) { throw res.errors[0]; }
+      var zones = res.zones.filter(function (z) { return z.zoneID.zoneName !== "_defaultZone"; });
+      return Promise.all(zones.map(function (z) { return fetchZone(db, z.zoneID, null, []); }));
+    }).then(function (perZone) {
+      var records = [].concat.apply([], perZone);
+      return render(records, listId);
+    });
+  }
+
+  function fetchZone(db, zoneID, syncToken, acc) {
+    var sig = { zoneID: zoneID, desiredRecordTypes: ["CD_Recipe", "CD_Snapshot"] };
+    if (syncToken) { sig.syncToken = syncToken; }
+    return db.fetchRecordZoneChanges([sig]).then(function (res) {
+      if (res.hasErrors) { throw res.errors[0]; }
+      var z = res.zones[0];
+      acc = acc.concat(z.records.filter(function (r) { return !r.deleted; }));
+      return z.moreComing ? fetchZone(db, zoneID, z.syncToken, acc) : acc;
+    });
+  }
+
+  function field(r, name) {
+    var f = r.fields && r.fields[name];
+    return f ? f.value : null;
+  }
+
+  function render(records, listId) {
+    var titles = {};
+    records.forEach(function (r) {
+      if (r.recordType === "CD_Snapshot") { titles[r.recordName] = field(r, "CD_titleStorage"); }
+    });
+    var recipes = records.filter(function (r) {
+      return r.recordType === "CD_Recipe" && !field(r, "CD_deletedAtStorage");
+    }).map(function (r) {
+      return titles[field(r, "CD_currentSnapshot")] || null;
+    }).sort(function (a, b) { return (a || "~").localeCompare(b || "~"); });
+
+    var ul = document.getElementById(listId);
+    ul.innerHTML = "";
+    recipes.forEach(function (t) {
+      var li = document.createElement("li");
+      li.textContent = t || "(no title found)";
+      if (!t) { li.className = "muted"; }
+      ul.appendChild(li);
+    });
+    document.getElementById(listId + "-h").hidden = false;
+    return recipes.length;
+  }
+});
+</script>
+</body>
+</html>
