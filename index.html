@@ -104,8 +104,7 @@
 var API_TOKEN = "d881113a273253bee01ec645c0194cb60a0c29d6d769ff722f525d53eb0ceb50";
 var REFRESH_MS = 5 * 60 * 1000;
 var LIST_KEYS = [
-  "CD_idStorage", "CD_currentSnapshot", "CD_deletedAtStorage", "CD_thumbnailData", "CD_household",
-  "CD_titleStorage", "CD_ingredientNamesStorage",
+  "CD_idStorage", "CD_currentSnapshot", "CD_deletedAtStorage",
   "CD_nameStorage", "CD_joinedKitchenIDStorage"
 ];
 var PIN_KEYS = ["CD_recipeIDStorage", "CD_sortIndexStorage"];
@@ -196,108 +195,222 @@ function start() {
     .catch(function (e) { say("Couldn't start: " + errText(e), true); });
 
   // ---------- loading ----------
+  // First visit: recipe records only (no old versions, no pantry or shopping), then the
+  // current version's title for each recipe. Later visits: the saved copy shows at once and
+  // fetchRecordZoneChanges with the saved syncToken brings only what changed.
 
-  function fetchZone(db, zoneID, keys, token, acc) {
-    var sig = { zoneID: zoneID, desiredKeys: keys };
+  var CACHE_KEY = "dinnerd-viewer-cache-v1";
+  var cache = loadCache();
+  var dbs = { "private": container.privateCloudDatabase, "shared": container.sharedCloudDatabase };
+
+  function loadCache() {
+    try { var c = JSON.parse(localStorage.getItem(CACHE_KEY)); if (c && c.zones) { return c; } } catch (e) {}
+    return { zones: {} };
+  }
+  function saveCache() {
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch (e) {}
+  }
+  function zoneKey(dbName, zoneID) { return dbName + "|" + zoneID.zoneName + "|" + (zoneID.ownerRecordName || ""); }
+  function emptyZone(dbName, zoneID) {
+    return { db: dbName, zoneID: zoneID, token: null, recipes: {}, households: {}, pins: {}, snaps: {} };
+  }
+
+  function fetchChanges(db, zoneID, types, token, acc) {
+    var keys = types.indexOf("CD_PinnedRecipe") >= 0 ? LIST_KEYS.concat(PIN_KEYS) : LIST_KEYS;
+    var sig = { zoneID: zoneID, desiredRecordTypes: types, desiredKeys: keys };
     if (token) { sig.syncToken = token; }
     return db.fetchRecordZoneChanges([sig]).then(function (res) {
       if (res.hasErrors) { throw res.errors[0]; }
       var z = res.zones[0];
-      acc = acc.concat(z.records.filter(function (r) { return !r.deleted; }));
-      return z.moreComing ? fetchZone(db, zoneID, keys, z.syncToken, acc) : acc;
+      acc.records = acc.records.concat(z.records);
+      acc.token = z.syncToken;
+      return z.moreComing ? fetchChanges(db, zoneID, types, z.syncToken, acc) : acc;
     });
   }
-  // Pin field names don't exist in iCloud until the app ships them; retry without if refused.
-  function fetchZoneSafe(db, zoneID) {
-    return fetchZone(db, zoneID, LIST_KEYS.concat(PIN_KEYS), null, [])
-      .catch(function () { return fetchZone(db, zoneID, LIST_KEYS, null, []); })
-      .then(function (records) { return { db: db, zoneID: zoneID, records: records }; });
+  // CD_PinnedRecipe doesn't exist in iCloud until the app ships it; retry without it if refused.
+  function fetchChangesSafe(db, zoneID, token) {
+    var base = ["CD_Recipe", "CD_Household"];
+    return fetchChanges(db, zoneID, base.concat(["CD_PinnedRecipe"]), token, { records: [] })
+      .catch(function () { return fetchChanges(db, zoneID, base, token, { records: [] }); });
   }
-  function fetchDatabase(db) {
-    return db.fetchAllRecordZones().then(function (res) {
-      if (res.hasErrors) { throw res.errors[0]; }
-      var zones = res.zones.filter(function (z) { return z.zoneID.zoneName !== "_defaultZone"; });
-      return Promise.all(zones.map(function (z) { return fetchZoneSafe(db, z.zoneID); }));
+
+  function applyChanges(z, records) {
+    records.forEach(function (r) {
+      var n = r.recordName;
+      if (r.deleted) { delete z.recipes[n]; delete z.households[n]; delete z.pins[n]; return; }
+      if (r.recordType === "CD_Recipe") {
+        z.recipes[n] = { id: (field(r, "CD_idStorage") || "").toUpperCase(), snap: field(r, "CD_currentSnapshot"),
+          gone: !!field(r, "CD_deletedAtStorage") };
+      } else if (r.recordType === "CD_Household") {
+        z.households[n] = { id: (field(r, "CD_idStorage") || "").toUpperCase(), name: field(r, "CD_nameStorage") || "",
+          joined: (field(r, "CD_joinedKitchenIDStorage") || "").toUpperCase() };
+      } else if (r.recordType === "CD_PinnedRecipe") {
+        z.pins[n] = { id: (field(r, "CD_recipeIDStorage") || "").toUpperCase(), order: field(r, "CD_sortIndexStorage") || 0 };
+      }
     });
   }
 
-  function buildRecipes(zoneData) {
-    var snaps = {};
-    zoneData.records.forEach(function (r) {
-      if (r.recordType === "CD_Snapshot") { snaps[r.recordName] = r; }
-    });
-    return zoneData.records.filter(function (r) {
-      return r.recordType === "CD_Recipe" && !field(r, "CD_deletedAtStorage") && field(r, "CD_currentSnapshot");
-    }).map(function (r) {
-      var s = snaps[field(r, "CD_currentSnapshot")];
-      return {
-        id: (field(r, "CD_idStorage") || "").toUpperCase(),
-        recordName: r.recordName,
-        snapshotName: field(r, "CD_currentSnapshot"),
-        title: (s && field(s, "CD_titleStorage")) || "Untitled Recipe",
-        search: (((s && field(s, "CD_titleStorage")) || "") + " " + ((s && field(s, "CD_ingredientNamesStorage")) || "")).toLowerCase(),
-        thumb: imageURL(r, "CD_thumbnailData"),
-        db: zoneData.db,
-        zoneID: zoneData.zoneID
-      };
-    });
-  }
-  function households(zoneData) {
-    return zoneData.records.filter(function (r) { return r.recordType === "CD_Household"; });
-  }
-
-  function load() {
-    if (!state.loadedOnce) { say("Loading your recipes…"); }
-    Promise.all([fetchDatabase(container.privateCloudDatabase), fetchDatabase(container.sharedCloudDatabase)])
-      .then(function (both) {
-        var privateZones = both[0], sharedZones = both[1];
-        var joinedIDs = {};
-        var pins = [];
-        var mine = { key: "mine", name: "My Recipes", isMine: true, recipes: [] };
-
-        privateZones.forEach(function (z) {
-          households(z).forEach(function (h) {
-            var j = field(h, "CD_joinedKitchenIDStorage");
-            if (j) { joinedIDs[j.toUpperCase()] = true; }
-          });
-          z.records.forEach(function (r) {
-            if (r.recordType === "CD_PinnedRecipe" && field(r, "CD_recipeIDStorage")) {
-              pins.push({ id: field(r, "CD_recipeIDStorage").toUpperCase(), order: field(r, "CD_sortIndexStorage") || 0 });
+  // Titles for current versions only, 200 per request, 3 requests at a time.
+  function fetchTitles(db, z) {
+    var wanted = {};
+    Object.keys(z.recipes).forEach(function (n) { var s = z.recipes[n].snap; if (s && !z.recipes[n].gone) { wanted[s] = true; } });
+    Object.keys(z.snaps).forEach(function (s) { if (!wanted[s]) { delete z.snaps[s]; } });
+    var missing = Object.keys(wanted).filter(function (s) { return !z.snaps[s]; });
+    var chunks = [];
+    for (var i = 0; i < missing.length; i += 200) { chunks.push(missing.slice(i, i + 200)); }
+    function next() {
+      var chunk = chunks.shift();
+      if (!chunk) { return Promise.resolve(); }
+      return db.fetchRecords(chunk, { zoneID: z.zoneID, desiredKeys: ["CD_titleStorage", "CD_ingredientNamesStorage"] })
+        .then(function (res) {
+          (res.records || []).forEach(function (r) {
+            if (r.recordType === "CD_Snapshot") {
+              z.snaps[r.recordName] = { t: field(r, "CD_titleStorage") || "", s: field(r, "CD_ingredientNamesStorage") || "" };
             }
           });
-          mine.recipes = mine.recipes.concat(buildRecipes(z));
-        });
+          if (!state.loadedOnce) { progress(); }
+        })
+        .catch(function () {})
+        .then(next);
+    }
+    return Promise.all([next(), next(), next()]);
+  }
 
-        var friends = {};
-        sharedZones.forEach(function (z) {
-          var hs = households(z);
-          var isJoined = hs.some(function (h) { return joinedIDs[(field(h, "CD_idStorage") || "").toUpperCase()]; });
-          var recipes = buildRecipes(z);
-          if (isJoined) { mine.recipes = mine.recipes.concat(recipes); return; }
-          var owner = z.zoneID.ownerRecordName || z.zoneID.zoneName;
-          if (!friends[owner]) {
-            var hName = hs.length ? field(hs[0], "CD_nameStorage") : "";
-            friends[owner] = { key: owner, name: libraryTitle(hName), isMine: false, recipes: [] };
-          }
-          friends[owner].recipes = friends[owner].recipes.concat(recipes);
-        });
+  function progress() {
+    var n = 0;
+    Object.keys(cache.zones).forEach(function (k) { n += Object.keys(cache.zones[k].snaps).length; });
+    say("Loading your recipes… " + n + " so far");
+  }
 
-        pins.sort(function (a, b) { return a.order - b.order; });
-        state.pins = pins.map(function (p) { return p.id; });
-        state.libraries = [mine].concat(Object.keys(friends).map(function (k) { return friends[k]; })
-          .filter(function (f) { return f.recipes.length; })
-          .sort(function (a, b) { return a.name.localeCompare(b.name); }));
-        state.libraries.forEach(function (l) {
-          l.recipes.sort(function (a, b) { return a.title.localeCompare(b.title); });
-        });
-        state.loadedOnce = true;
-        say("");
-        if (!state.openRecipe) { render(); }
-        else { $("friendsBtn").hidden = true; }
+  function syncZone(dbName, zoneID) {
+    var key = zoneKey(dbName, zoneID), db = dbs[dbName];
+    var z = cache.zones[key] || emptyZone(dbName, zoneID);
+    z.zoneID = zoneID;
+    cache.zones[key] = z;
+    return fetchChangesSafe(db, zoneID, z.token).catch(function (e) {
+      if (!z.token) { throw e; }
+      // Saved token no longer accepted: start this zone over.
+      z = emptyZone(dbName, zoneID); cache.zones[key] = z;
+      return fetchChangesSafe(db, zoneID, null);
+    }).then(function (acc) {
+      applyChanges(z, acc.records);
+      return fetchTitles(db, z).then(function () { z.token = acc.token; });
+    });
+  }
+
+  function syncDatabase(dbName, seen) {
+    return dbs[dbName].fetchAllRecordZones().then(function (res) {
+      if (res.hasErrors) { throw res.errors[0]; }
+      var zones = res.zones.filter(function (z) { return z.zoneID.zoneName !== "_defaultZone"; });
+      zones.forEach(function (z) { seen[zoneKey(dbName, z.zoneID)] = true; });
+      return Promise.all(zones.map(function (z) { return syncZone(dbName, z.zoneID); }));
+    });
+  }
+
+  function buildLibraries() {
+    var joinedIDs = {}, pins = [];
+    var mine = { key: "mine", name: "My Recipes", isMine: true, recipes: [] };
+    var friends = {};
+    var keys = Object.keys(cache.zones);
+    keys.forEach(function (k) {
+      var z = cache.zones[k];
+      if (z.db !== "private") { return; }
+      Object.keys(z.households).forEach(function (n) { if (z.households[n].joined) { joinedIDs[z.households[n].joined] = true; } });
+      Object.keys(z.pins).forEach(function (n) { pins.push(z.pins[n]); });
+    });
+    keys.forEach(function (k) {
+      var z = cache.zones[k], db = dbs[z.db];
+      var recipes = Object.keys(z.recipes).filter(function (n) {
+        var r = z.recipes[n]; return !r.gone && r.snap && z.snaps[r.snap];
+      }).map(function (n) {
+        var r = z.recipes[n], s = z.snaps[r.snap];
+        return { id: r.id, recordName: n, snapshotName: r.snap, title: s.t || "Untitled Recipe",
+          search: (s.t + " " + s.s).toLowerCase(), db: db, zoneID: z.zoneID };
+      });
+      var hs = Object.keys(z.households).map(function (n) { return z.households[n]; });
+      var isJoined = hs.some(function (h) { return joinedIDs[h.id]; });
+      if (z.db === "private" || isJoined) { mine.recipes = mine.recipes.concat(recipes); return; }
+      var owner = z.zoneID.ownerRecordName || z.zoneID.zoneName;
+      if (!friends[owner]) { friends[owner] = { key: owner, name: libraryTitle(hs.length ? hs[0].name : ""), isMine: false, recipes: [] }; }
+      friends[owner].recipes = friends[owner].recipes.concat(recipes);
+    });
+    pins.sort(function (a, b) { return a.order - b.order; });
+    state.pins = pins.map(function (p) { return p.id; });
+    state.libraries = [mine].concat(Object.keys(friends).map(function (k) { return friends[k]; })
+      .filter(function (f) { return f.recipes.length; })
+      .sort(function (a, b) { return a.name.localeCompare(b.name); }));
+    state.libraries.forEach(function (l) { l.recipes.sort(function (a, b) { return a.title.localeCompare(b.title); }); });
+  }
+
+  function showFromCache() {
+    buildLibraries();
+    var any = state.libraries.some(function (l) { return l.recipes.length; });
+    if (!any) { return false; }
+    state.loadedOnce = true;
+    say("");
+    if (!state.openRecipe) { render(); }
+    return true;
+  }
+
+  var loading = false;
+  function load() {
+    if (loading) { return; }
+    loading = true;
+    if (!showFromCache()) { say("Loading your recipes…"); }
+    var seen = {};
+    Promise.all([syncDatabase("private", seen), syncDatabase("shared", seen)])
+      .then(function () {
+        Object.keys(cache.zones).forEach(function (k) { if (!seen[k]) { delete cache.zones[k]; } });
+        saveCache();
+        showFromCache();
+        if (!state.loadedOnce) { state.loadedOnce = true; say(""); render(); }
       })
       .catch(function (e) {
         if (!state.loadedOnce) { say("Couldn't load your recipes: " + errText(e), true); }
-      });
+      })
+      .then(function () { loading = false; });
+  }
+
+  // ---------- thumbnails: only rows on screen, fetched in small batches ----------
+  var thumbCache = {}, thumbQueue = [], thumbTimer = null;
+  var observer = ("IntersectionObserver" in window) ? new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (!e.isIntersecting) { return; }
+      observer.unobserve(e.target);
+      thumbQueue.push(e.target);
+    });
+    if (thumbQueue.length && !thumbTimer) { thumbTimer = setTimeout(flushThumbs, 150); }
+  }, { rootMargin: "400px 0px" }) : null;
+
+  function flushThumbs() {
+    thumbTimer = null;
+    var batch = thumbQueue.splice(0, 50);
+    if (!batch.length) { return; }
+    var groups = {};
+    batch.forEach(function (node) {
+      var r = node._recipe, gk = zoneKey(r.db === dbs.private ? "private" : "shared", r.zoneID);
+      (groups[gk] = groups[gk] || { recipe: r, nodes: [] }).nodes.push(node);
+    });
+    Object.keys(groups).forEach(function (gk) {
+      var g = groups[gk];
+      g.recipe.db.fetchRecords(g.nodes.map(function (n) { return n._recipe.recordName; }),
+        { zoneID: g.recipe.zoneID, desiredKeys: ["CD_thumbnailData"] })
+        .then(function (res) {
+          (res.records || []).forEach(function (r) { thumbCache[r.recordName] = imageURL(r, "CD_thumbnailData") || ""; });
+          g.nodes.forEach(function (n) { setThumb(n, thumbCache[n._recipe.recordName]); });
+        }).catch(function () {});
+    });
+    if (thumbQueue.length) { thumbTimer = setTimeout(flushThumbs, 150); }
+  }
+  function setThumb(node, url) {
+    if (!url) { return; }
+    var img = el("img"); img.src = url; img.alt = "";
+    node.replaceWith(img);
+  }
+  function watchThumb(node, recipe) {
+    node._recipe = recipe;
+    if (thumbCache.hasOwnProperty(recipe.recordName)) { setThumb(node, thumbCache[recipe.recordName]); return; }
+    if (observer) { observer.observe(node); }
   }
 
   // ---------- views ----------
@@ -319,9 +432,7 @@ function start() {
 
   function row(recipe) {
     var r = el("div", "row");
-    if (recipe.thumb) {
-      var img = el("img"); img.src = recipe.thumb; img.alt = ""; img.loading = "lazy"; r.appendChild(img);
-    } else { r.appendChild(el("div", "ph")); }
+    var ph = el("div", "ph"); r.appendChild(ph); watchThumb(ph, recipe);
     r.appendChild(el("div", "t serif", recipe.title));
     r.onclick = function () { openRecipe(recipe); };
     return r;
