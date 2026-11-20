@@ -47,7 +47,11 @@
   .bar h1 { flex: 1; margin: 0; font-size: 30px; min-width: 200px; }
   button { font: inherit; font-size: 18px; padding: 10px 18px; border-radius: 12px; cursor: pointer;
     border: 1px solid var(--muted); background: var(--surface); color: var(--mutedText); min-height: 48px; }
-  input[type=search] { width: 100%; margin-top: 12px; font: inherit; padding: 12px 16px; border-radius: 12px;
+  .tools { display: flex; gap: 12px; margin-top: 12px; }
+  .tools input { flex: 1; min-width: 0; }
+  select { font: inherit; font-size: 18px; padding: 10px 14px; border-radius: 12px; min-height: 48px;
+    border: 1px solid var(--muted); background: var(--surface); color: var(--mutedText); }
+  input[type=search] { width: 100%; font: inherit; padding: 12px 16px; border-radius: 12px;
     border: 1px solid var(--line); background: var(--surface); color: var(--text); -webkit-appearance: none; }
   main { padding: 8px 24px 48px; }
   h2 { font-size: 18px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); margin: 24px 0 8px; }
@@ -84,7 +88,19 @@
     <button id="friendsBtn" hidden>Friends' Recipes</button>
     <button id="mineBtn" hidden>Back to My Recipes</button>
   </div>
-  <input id="search" type="search" placeholder="Search" autocomplete="off" hidden>
+  <div class="tools" id="tools" hidden>
+    <input id="search" type="search" placeholder="Search" autocomplete="off">
+    <select id="sort" aria-label="Sort">
+      <option value="newest">Newest</option>
+      <option value="alphabetical">Alphabetical</option>
+      <option value="lastCooked">Last Cooked</option>
+      <option value="highestRated">Highest Rated</option>
+      <option value="totalTime">Total Time</option>
+      <option value="numberCooked">Times Made</option>
+      <option value="activePrepTime">Active Prep Time</option>
+      <option value="ingredientCount">Ingredient Count</option>
+    </select>
+  </div>
   <div id="auth"><div id="sign-in-button"></div><div id="sign-out-button" hidden></div></div>
 </header>
 <main>
@@ -105,6 +121,7 @@ var API_TOKEN = "d881113a273253bee01ec645c0194cb60a0c29d6d769ff722f525d53eb0ceb5
 var REFRESH_MS = 5 * 60 * 1000;
 var LIST_KEYS = [
   "CD_idStorage", "CD_currentSnapshot", "CD_deletedAtStorage",
+  "CD_createdAtStorage", "CD_ratingStorage", "CD_lastCookedAtStorage", "CD_cookCountStorage",
   "CD_nameStorage", "CD_joinedKitchenIDStorage"
 ];
 var PIN_KEYS = ["CD_recipeIDStorage", "CD_sortIndexStorage"];
@@ -199,7 +216,8 @@ function start() {
   // current version's title for each recipe. Later visits: the saved copy shows at once and
   // fetchRecordZoneChanges with the saved syncToken brings only what changed.
 
-  var CACHE_KEY = "dinnerd-viewer-cache-v1";
+  var CACHE_KEY = "dinnerd-viewer-cache-v2"; // v2 adds sort fields
+  try { localStorage.removeItem("dinnerd-viewer-cache-v1"); } catch (e) {}
   var cache = loadCache();
   var dbs = { "private": container.privateCloudDatabase, "shared": container.sharedCloudDatabase };
 
@@ -240,7 +258,9 @@ function start() {
       if (r.deleted) { delete z.recipes[n]; delete z.households[n]; delete z.pins[n]; return; }
       if (r.recordType === "CD_Recipe") {
         z.recipes[n] = { id: (field(r, "CD_idStorage") || "").toUpperCase(), snap: field(r, "CD_currentSnapshot"),
-          gone: !!field(r, "CD_deletedAtStorage") };
+          gone: !!field(r, "CD_deletedAtStorage"), c: field(r, "CD_createdAtStorage") || 0,
+          rt: field(r, "CD_ratingStorage") || 0, lc: field(r, "CD_lastCookedAtStorage") || 0,
+          n: field(r, "CD_cookCountStorage") || 0 };
       } else if (r.recordType === "CD_Household") {
         z.households[n] = { id: (field(r, "CD_idStorage") || "").toUpperCase(), name: field(r, "CD_nameStorage") || "",
           joined: (field(r, "CD_joinedKitchenIDStorage") || "").toUpperCase() };
@@ -261,11 +281,14 @@ function start() {
     function next() {
       var chunk = chunks.shift();
       if (!chunk) { return Promise.resolve(); }
-      return db.fetchRecords(chunk, { zoneID: z.zoneID, desiredKeys: ["CD_titleStorage", "CD_ingredientNamesStorage"] })
+      return db.fetchRecords(chunk, { zoneID: z.zoneID, desiredKeys: ["CD_titleStorage", "CD_ingredientNamesStorage",
+        "CD_prepTimeMinutesStorage", "CD_cookTimeMinutesStorage", "CD_totalTimeMinutesStorage", "CD_ingredientCountStorage"] })
         .then(function (res) {
           (res.records || []).forEach(function (r) {
             if (r.recordType === "CD_Snapshot") {
-              z.snaps[r.recordName] = { t: field(r, "CD_titleStorage") || "", s: field(r, "CD_ingredientNamesStorage") || "" };
+              z.snaps[r.recordName] = { t: field(r, "CD_titleStorage") || "", s: field(r, "CD_ingredientNamesStorage") || "",
+                p: field(r, "CD_prepTimeMinutesStorage") || 0, ck: field(r, "CD_cookTimeMinutesStorage") || 0,
+                tt: field(r, "CD_totalTimeMinutesStorage") || 0, ic: field(r, "CD_ingredientCountStorage") || 0 };
             }
           });
           if (!state.loadedOnce) { progress(); }
@@ -325,7 +348,9 @@ function start() {
       }).map(function (n) {
         var r = z.recipes[n], s = z.snaps[r.snap];
         return { id: r.id, recordName: n, snapshotName: r.snap, title: s.t || "Untitled Recipe",
-          search: (s.t + " " + s.s).toLowerCase(), db: db, zoneID: z.zoneID };
+          search: (s.t + " " + s.s).toLowerCase(), db: db, zoneID: z.zoneID,
+          created: r.c || 0, rating: r.rt || 0, lastCooked: r.lc || 0, made: r.n || 0,
+          prep: s.p || 0, total: s.tt || ((s.p || 0) + (s.ck || 0)), ingredients: s.ic || 0 };
       });
       var hs = Object.keys(z.households).map(function (n) { return z.households[n]; });
       var isJoined = hs.some(function (h) { return joinedIDs[h.id]; });
@@ -339,7 +364,7 @@ function start() {
     state.libraries = [mine].concat(Object.keys(friends).map(function (k) { return friends[k]; })
       .filter(function (f) { return f.recipes.length; })
       .sort(function (a, b) { return a.name.localeCompare(b.name); }));
-    state.libraries.forEach(function (l) { l.recipes.sort(function (a, b) { return a.title.localeCompare(b.title); }); });
+
   }
 
   function showFromCache() {
@@ -423,7 +448,7 @@ function start() {
     $("listView").hidden = which !== "list";
     $("friendsView").hidden = which !== "friends";
     $("detailView").hidden = which !== "detail";
-    $("search").hidden = which !== "list";
+    $("tools").hidden = which !== "list";
     $("backToList").hidden = which !== "detail";
     var hasFriends = state.libraries.length > 1;
     $("friendsBtn").hidden = !(which === "list" && state.view === "mine" && hasFriends);
@@ -444,7 +469,7 @@ function start() {
     if (!lib) { return; }
     $("title").textContent = lib.name;
     var q = $("search").value.trim().toLowerCase();
-    var recipes = lib.recipes.filter(function (r) { return !q || r.search.indexOf(q) >= 0; });
+    var recipes = sortRecipes(lib.recipes.filter(function (r) { return !q || r.search.indexOf(q) >= 0; }));
 
     var pinned = [];
     if (lib.isMine && !q && state.pins.length) {
@@ -484,6 +509,40 @@ function start() {
   $("mineBtn").onclick = function () { state.view = "mine"; state.friendKey = null; $("search").value = ""; render(); };
   $("backToList").onclick = function () { state.openRecipe = null; render(); window.scrollTo(0, 0); };
   $("search").oninput = render;
+
+  // Same sorts and names as the app's Sort menu (RecipeSort in RecipeListView.swift).
+  // Pinned recipes keep their own order. A missing value (no rating, never cooked, no time)
+  // goes last; ties go newest first, like the app.
+  var SORT_KEY = "dinnerd-viewer-sort";
+  var sortSel = $("sort");
+  try { var savedSort = localStorage.getItem(SORT_KEY); if (savedSort) { sortSel.value = savedSort; } } catch (e) {}
+  if (!sortSel.value) { sortSel.value = "alphabetical"; }
+  sortSel.onchange = function () {
+    try { localStorage.setItem(SORT_KEY, sortSel.value); } catch (e) {}
+    render(); window.scrollTo(0, 0);
+  };
+  function sortRecipes(list) {
+    var mode = sortSel.value;
+    function newest(a, b) { return b.created - a.created; }
+    function desc(k) { return function (a, b) { return (b[k] - a[k]) || newest(a, b); }; }
+    function ascMissingLast(k) {
+      return function (a, b) {
+        var x = a[k] > 0 ? a[k] : Infinity, y = b[k] > 0 ? b[k] : Infinity;
+        return (x === y ? 0 : x - y) || newest(a, b);
+      };
+    }
+    var cmp = {
+      newest: newest,
+      alphabetical: function (a, b) { return a.title.localeCompare(b.title, undefined, { sensitivity: "base" }) || newest(a, b); },
+      lastCooked: desc("lastCooked"),
+      highestRated: desc("rating"),
+      totalTime: ascMissingLast("total"),
+      numberCooked: desc("made"),
+      activePrepTime: ascMissingLast("prep"),
+      ingredientCount: ascMissingLast("ingredients")
+    }[mode] || newest;
+    return list.slice().sort(cmp);
+  }
 
   function openRecipe(recipe) {
     state.openRecipe = recipe;
