@@ -3,50 +3,168 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Dinnerd Viewer Test</title>
+<meta name="robots" content="noindex, nofollow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Dinnerd Recipes</title>
 <!--
-  Feasibility test for the read-only Dinnerd kitchen viewer (old iPad first, HomeView later).
-  Reads Dinnerd's iCloud data with CloudKit JS 2, Apple's official web access:
-  https://developer.apple.com/documentation/cloudkitjs
-  - setUpAuth / whenUserSignsIn: Apple Account sign-in.
-  - privateCloudDatabase and sharedCloudDatabase: own and household data.
-  - fetchAllRecordZones + fetchRecordZoneChanges: reads whole zones, no query indexes needed.
-  Reading the record layout NSPersistentCloudKitContainer writes (CD_ prefixes) is NOT an
-  official Apple procedure; it is the closest documented route. Read-only: this page never saves.
+  Read-only Dinnerd kitchen viewer (old iPad first, HomeView later). Recipes only, current
+  version only. Never writes to iCloud.
+
+  Data access: CloudKit JS 2, Apple's official web access to iCloud
+  (https://developer.apple.com/documentation/cloudkitjs): setUpAuth for sign-in,
+  privateCloudDatabase + sharedCloudDatabase, fetchAllRecordZones + fetchRecordZoneChanges
+  (whole zones, no query indexes), fetchRecords for one recipe on open.
+
+  NOT an official Apple procedure: reading the record layout NSPersistentCloudKitContainer
+  writes (record types CD_<Entity>, fields CD_<attribute>, to-one relationships as the target's
+  record name, large binaries as CD_<attribute>_ckAsset). Field names track the Core Data model
+  (RecipeApp.xcdatamodeld); a model rename breaks this page.
+
+  Libraries: private database = mine. A shared zone whose Household id equals my own
+  Household's joinedKitchenID is my joined household library (also mine). Every other shared
+  zone is a friend's library, named like the app does (LibrarySwitcherViewModel.libraryTitle).
+
+  Pins: the app keeps pins in iCloud key-value storage, which web pages can't read. The app will
+  also write CD_PinnedRecipe records (CD_recipeIDStorage, CD_sortIndexStorage) to the private
+  database; until then the Pinned section stays hidden.
 -->
 <style>
-  :root { color-scheme: light dark; }
-  body { font: 20px -apple-system, Helvetica, sans-serif; margin: 24px; background: #fff; color: #111; }
-  @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }
-  #status { margin: 16px 0; }
-  li { padding: 6px 0; }
-  .muted { opacity: 0.6; }
-  .error { color: #c00; white-space: pre-wrap; }
+  :root {
+    --bg: #FBFAF8; --surface: #FFFFFF; --text: #1A1A1A; --text2: #5A554B;
+    --muted: #B8815B; --mutedText: #96593A; --accent: #D96A15; --line: rgba(0,0,0,0.1);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1B1917; --surface: #2A2420; --text: #EDEBE7; --text2: #BDB4A4;
+      --muted: #C99680; --mutedText: #C99680; --accent: #E8823A; --line: rgba(255,255,255,0.12); }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 20px/1.45 -apple-system, "Helvetica Neue", Helvetica, sans-serif; -webkit-text-size-adjust: 100%; }
+  .serif { font-family: "New York", ui-serif, Georgia, serif; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 16px 24px 12px;
+    border-bottom: 1px solid var(--line); }
+  .bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .bar h1 { flex: 1; margin: 0; font-size: 30px; min-width: 200px; }
+  button { font: inherit; font-size: 18px; padding: 10px 18px; border-radius: 12px; cursor: pointer;
+    border: 1px solid var(--muted); background: var(--surface); color: var(--mutedText); min-height: 48px; }
+  input[type=search] { width: 100%; margin-top: 12px; font: inherit; padding: 12px 16px; border-radius: 12px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--text); -webkit-appearance: none; }
+  main { padding: 8px 24px 48px; }
+  h2 { font-size: 18px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); margin: 24px 0 8px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 0 24px; }
+  .row { display: flex; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line);
+    cursor: pointer; min-height: 72px; }
+  .row img, .row .ph { width: 64px; height: 64px; border-radius: 10px; object-fit: cover; flex: none; background: var(--surface); }
+  .row .t { font-size: 22px; }
+  #status { color: var(--text2); margin: 16px 0; }
+  #status.error { color: #c0392b; white-space: pre-wrap; }
+  .hero { width: 100%; max-height: 420px; object-fit: cover; border-radius: 16px; margin: 16px 0 0; }
+  .detail h1 { font-size: 38px; margin: 16px 0 4px; }
+  .detail .meta { color: var(--text2); margin-bottom: 8px; }
+  .cols { display: grid; grid-template-columns: minmax(260px, 1fr) 2fr; gap: 40px; }
+  @media (max-width: 760px) { .cols { grid-template-columns: 1fr; gap: 0; } }
+  .detail ul { list-style: none; padding: 0; margin: 0; }
+  .detail li { padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .detail h3 { font-size: 24px; margin: 24px 0 8px; }
+  .detail h4 { font-size: 20px; margin: 18px 0 4px; color: var(--mutedText); }
+  ol.steps { padding-left: 1.6em; margin: 0; }
+  ol.steps li { padding: 10px 0 10px 6px; font-size: 22px; }
+  .note { background: var(--surface); border-left: 4px solid var(--muted); padding: 10px 14px; border-radius: 8px; margin: 8px 0; }
+  .friends a { display: block; padding: 18px 0; border-bottom: 1px solid var(--line); font-size: 24px; color: var(--text);
+    text-decoration: none; cursor: pointer; }
+  [hidden] { display: none !important; }
+  #auth { margin-top: 8px; }
 </style>
 </head>
 <body>
-<h1>Dinnerd Viewer Test</h1>
-<div id="sign-in-button"></div>
-<div id="sign-out-button"></div>
-<div id="status">Starting…</div>
-<h2 id="mine-h" hidden>My recipes</h2><ul id="mine"></ul>
-<h2 id="shared-h" hidden>Shared with me</h2><ul id="shared"></ul>
+<header>
+  <div class="bar">
+    <h1 id="title" class="serif">My Recipes</h1>
+    <button id="backToList" hidden>Back</button>
+    <button id="friendsBtn" hidden>Friends' Recipes</button>
+    <button id="mineBtn" hidden>Back to My Recipes</button>
+  </div>
+  <input id="search" type="search" placeholder="Search" autocomplete="off" hidden>
+  <div id="auth"><div id="sign-in-button"></div><div id="sign-out-button" hidden></div></div>
+</header>
+<main>
+  <div id="status">Loading…</div>
+  <section id="listView" hidden>
+    <div id="pinnedWrap" hidden><h2>Pinned</h2><div id="pinned" class="grid"></div><h2>All Recipes</h2></div>
+    <div id="list" class="grid"></div>
+  </section>
+  <section id="friendsView" class="friends" hidden></section>
+  <section id="detailView" class="detail" hidden></section>
+</main>
 
 <script src="https://cdn.apple-cloudkit.com/ck/2/cloudkit.js"></script>
 <script>
 "use strict";
 
-// Set in CloudKit Console: Dinnerd's container, API Access, new API token.
 var API_TOKEN = "d881113a273253bee01ec645c0194cb60a0c29d6d769ff722f525d53eb0ceb50";
+var REFRESH_MS = 5 * 60 * 1000;
+var LIST_KEYS = [
+  "CD_idStorage", "CD_currentSnapshot", "CD_deletedAtStorage", "CD_thumbnailData", "CD_household",
+  "CD_titleStorage", "CD_ingredientNamesStorage",
+  "CD_nameStorage", "CD_joinedKitchenIDStorage"
+];
+var PIN_KEYS = ["CD_recipeIDStorage", "CD_sortIndexStorage"];
 
-var statusEl = document.getElementById("status");
+var $ = function (id) { return document.getElementById(id); };
+var state = {
+  libraries: [],   // { key, name, isMine, recipes: [...] }
+  pins: [],        // recipe UUID strings in order
+  view: "mine",    // "mine" | "friends" | "friend"
+  friendKey: null,
+  openRecipe: null,
+  loadedOnce: false
+};
+
 function say(text, isError) {
-  statusEl.textContent = text;
-  statusEl.className = isError ? "error" : "";
+  var s = $("status");
+  s.hidden = !text;
+  s.textContent = text || "";
+  s.className = isError ? "error" : "";
 }
-function showError(where, err) {
-  var msg = (err && (err.ckErrorCode || err.serverErrorCode || err.reason || err.message)) || String(err);
-  say(where + ": " + msg, true);
+function errText(e) {
+  return (e && (e.ckErrorCode || e.serverErrorCode || e.reason || e.message)) || String(e);
+}
+function field(r, name) {
+  var f = r.fields && r.fields[name];
+  return f ? f.value : null;
+}
+function base64ToText(b64) {
+  var bin = atob(b64), bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) { bytes[i] = bin.charCodeAt(i); }
+  return new TextDecoder("utf-8").decode(bytes);
+}
+// A Core Data binary attribute arrives as BYTES (base64) or, when large, as an ASSET.
+function readJSON(r, name) {
+  var inline = field(r, name);
+  if (inline) { try { return Promise.resolve(JSON.parse(base64ToText(inline))); } catch (e) { return Promise.resolve(null); } }
+  var asset = field(r, name + "_ckAsset");
+  if (asset && asset.downloadURL) {
+    return fetch(asset.downloadURL).then(function (res) { return res.json(); }).catch(function () { return null; });
+  }
+  return Promise.resolve(null);
+}
+function imageURL(r, name) {
+  var inline = field(r, name);
+  if (inline) { return "data:image/jpeg;base64," + inline; }
+  var asset = field(r, name + "_ckAsset");
+  return asset && asset.downloadURL ? asset.downloadURL : null;
+}
+function libraryTitle(name) {
+  var n = (name || "").trim();
+  if (!n) { return "Friend's Library"; }
+  var l = n.toLowerCase();
+  return (l.indexOf("library") >= 0 || l.indexOf("kitchen") >= 0) ? n : n + "'s Library";
+}
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) { e.className = cls; }
+  if (text != null) { e.textContent = text; }
+  return e;
 }
 
 function start() {
@@ -55,91 +173,278 @@ function start() {
       containerIdentifier: "iCloud.com.jasonyohman.recipeapp",
       apiTokenAuth: {
         apiToken: API_TOKEN,
-        persist: true, // keep the iPad signed in between visits
+        persist: true,
         signInButton: { id: "sign-in-button", theme: "black" },
         signOutButton: { id: "sign-out-button", theme: "black" }
       },
-      environment: "production" // TestFlight data; use "development" for Xcode builds
+      environment: "production"
     }]
   });
   var container = CloudKit.getDefaultContainer();
 
   function waitForSignIn() {
-    say("Tap Sign in with Apple to see your recipes.");
-    container.whenUserSignsIn().then(loadAll).catch(function (e) { showError("Sign-in", e); });
+    $("auth").hidden = false;
+    say("Sign in with your Apple Account to see your recipes.");
+    container.whenUserSignsIn().then(onSignedIn).catch(function (e) { say("Sign-in problem: " + errText(e), true); });
   }
-
-  container.setUpAuth().then(function (user) {
-    if (user) { loadAll(); } else { waitForSignIn(); }
-  }).catch(function (e) { showError("Setup", e); });
-
-  container.whenUserSignsOut().then(function () {
-    document.getElementById("mine").innerHTML = "";
-    document.getElementById("shared").innerHTML = "";
-    waitForSignIn();
-  });
-
-  function loadAll() {
-    say("Loading…");
-    Promise.all([
-      loadDatabase(container.privateCloudDatabase, "mine"),
-      loadDatabase(container.sharedCloudDatabase, "shared")
-    ]).then(function (counts) {
-      say("Done. " + counts[0] + " of my recipes, " + counts[1] + " shared.");
-    }).catch(function (e) { showError("Loading", e); });
+  function onSignedIn() {
+    $("auth").hidden = true;
+    load();
+    setInterval(load, REFRESH_MS);
   }
+  container.setUpAuth().then(function (user) { if (user) { onSignedIn(); } else { waitForSignIn(); } })
+    .catch(function (e) { say("Couldn't start: " + errText(e), true); });
 
-  // Reads every zone in one database, keeping only recipe and version records.
-  function loadDatabase(db, listId) {
-    return db.fetchAllRecordZones().then(function (res) {
-      if (res.hasErrors) { throw res.errors[0]; }
-      var zones = res.zones.filter(function (z) { return z.zoneID.zoneName !== "_defaultZone"; });
-      return Promise.all(zones.map(function (z) { return fetchZone(db, z.zoneID, null, []); }));
-    }).then(function (perZone) {
-      var records = [].concat.apply([], perZone);
-      return render(records, listId);
-    });
-  }
+  // ---------- loading ----------
 
-  function fetchZone(db, zoneID, syncToken, acc) {
-    var sig = { zoneID: zoneID, desiredRecordTypes: ["CD_Recipe", "CD_Snapshot"] };
-    if (syncToken) { sig.syncToken = syncToken; }
+  function fetchZone(db, zoneID, keys, token, acc) {
+    var sig = { zoneID: zoneID, desiredKeys: keys };
+    if (token) { sig.syncToken = token; }
     return db.fetchRecordZoneChanges([sig]).then(function (res) {
       if (res.hasErrors) { throw res.errors[0]; }
       var z = res.zones[0];
       acc = acc.concat(z.records.filter(function (r) { return !r.deleted; }));
-      return z.moreComing ? fetchZone(db, zoneID, z.syncToken, acc) : acc;
+      return z.moreComing ? fetchZone(db, zoneID, keys, z.syncToken, acc) : acc;
+    });
+  }
+  // Pin field names don't exist in iCloud until the app ships them; retry without if refused.
+  function fetchZoneSafe(db, zoneID) {
+    return fetchZone(db, zoneID, LIST_KEYS.concat(PIN_KEYS), null, [])
+      .catch(function () { return fetchZone(db, zoneID, LIST_KEYS, null, []); })
+      .then(function (records) { return { db: db, zoneID: zoneID, records: records }; });
+  }
+  function fetchDatabase(db) {
+    return db.fetchAllRecordZones().then(function (res) {
+      if (res.hasErrors) { throw res.errors[0]; }
+      var zones = res.zones.filter(function (z) { return z.zoneID.zoneName !== "_defaultZone"; });
+      return Promise.all(zones.map(function (z) { return fetchZoneSafe(db, z.zoneID); }));
     });
   }
 
-  function field(r, name) {
-    var f = r.fields && r.fields[name];
-    return f ? f.value : null;
-  }
-
-  function render(records, listId) {
-    var titles = {};
-    records.forEach(function (r) {
-      if (r.recordType === "CD_Snapshot") { titles[r.recordName] = field(r, "CD_titleStorage"); }
+  function buildRecipes(zoneData) {
+    var snaps = {};
+    zoneData.records.forEach(function (r) {
+      if (r.recordType === "CD_Snapshot") { snaps[r.recordName] = r; }
     });
-    var recipes = records.filter(function (r) {
-      return r.recordType === "CD_Recipe" && !field(r, "CD_deletedAtStorage");
+    return zoneData.records.filter(function (r) {
+      return r.recordType === "CD_Recipe" && !field(r, "CD_deletedAtStorage") && field(r, "CD_currentSnapshot");
     }).map(function (r) {
-      return titles[field(r, "CD_currentSnapshot")] || null;
-    }).sort(function (a, b) { return (a || "~").localeCompare(b || "~"); });
-
-    var ul = document.getElementById(listId);
-    ul.innerHTML = "";
-    recipes.forEach(function (t) {
-      var li = document.createElement("li");
-      li.textContent = t || "(no title found)";
-      if (!t) { li.className = "muted"; }
-      ul.appendChild(li);
+      var s = snaps[field(r, "CD_currentSnapshot")];
+      return {
+        id: (field(r, "CD_idStorage") || "").toUpperCase(),
+        recordName: r.recordName,
+        snapshotName: field(r, "CD_currentSnapshot"),
+        title: (s && field(s, "CD_titleStorage")) || "Untitled Recipe",
+        search: (((s && field(s, "CD_titleStorage")) || "") + " " + ((s && field(s, "CD_ingredientNamesStorage")) || "")).toLowerCase(),
+        thumb: imageURL(r, "CD_thumbnailData"),
+        db: zoneData.db,
+        zoneID: zoneData.zoneID
+      };
     });
-    document.getElementById(listId + "-h").hidden = false;
-    return recipes.length;
+  }
+  function households(zoneData) {
+    return zoneData.records.filter(function (r) { return r.recordType === "CD_Household"; });
+  }
+
+  function load() {
+    if (!state.loadedOnce) { say("Loading your recipes…"); }
+    Promise.all([fetchDatabase(container.privateCloudDatabase), fetchDatabase(container.sharedCloudDatabase)])
+      .then(function (both) {
+        var privateZones = both[0], sharedZones = both[1];
+        var joinedIDs = {};
+        var pins = [];
+        var mine = { key: "mine", name: "My Recipes", isMine: true, recipes: [] };
+
+        privateZones.forEach(function (z) {
+          households(z).forEach(function (h) {
+            var j = field(h, "CD_joinedKitchenIDStorage");
+            if (j) { joinedIDs[j.toUpperCase()] = true; }
+          });
+          z.records.forEach(function (r) {
+            if (r.recordType === "CD_PinnedRecipe" && field(r, "CD_recipeIDStorage")) {
+              pins.push({ id: field(r, "CD_recipeIDStorage").toUpperCase(), order: field(r, "CD_sortIndexStorage") || 0 });
+            }
+          });
+          mine.recipes = mine.recipes.concat(buildRecipes(z));
+        });
+
+        var friends = {};
+        sharedZones.forEach(function (z) {
+          var hs = households(z);
+          var isJoined = hs.some(function (h) { return joinedIDs[(field(h, "CD_idStorage") || "").toUpperCase()]; });
+          var recipes = buildRecipes(z);
+          if (isJoined) { mine.recipes = mine.recipes.concat(recipes); return; }
+          var owner = z.zoneID.ownerRecordName || z.zoneID.zoneName;
+          if (!friends[owner]) {
+            var hName = hs.length ? field(hs[0], "CD_nameStorage") : "";
+            friends[owner] = { key: owner, name: libraryTitle(hName), isMine: false, recipes: [] };
+          }
+          friends[owner].recipes = friends[owner].recipes.concat(recipes);
+        });
+
+        pins.sort(function (a, b) { return a.order - b.order; });
+        state.pins = pins.map(function (p) { return p.id; });
+        state.libraries = [mine].concat(Object.keys(friends).map(function (k) { return friends[k]; })
+          .filter(function (f) { return f.recipes.length; })
+          .sort(function (a, b) { return a.name.localeCompare(b.name); }));
+        state.libraries.forEach(function (l) {
+          l.recipes.sort(function (a, b) { return a.title.localeCompare(b.title); });
+        });
+        state.loadedOnce = true;
+        say("");
+        if (!state.openRecipe) { render(); }
+        else { $("friendsBtn").hidden = true; }
+      })
+      .catch(function (e) {
+        if (!state.loadedOnce) { say("Couldn't load your recipes: " + errText(e), true); }
+      });
+  }
+
+  // ---------- views ----------
+
+  function currentLibrary() {
+    var key = state.view === "friend" ? state.friendKey : "mine";
+    return state.libraries.filter(function (l) { return l.key === key; })[0] || state.libraries[0];
+  }
+  function show(which) {
+    $("listView").hidden = which !== "list";
+    $("friendsView").hidden = which !== "friends";
+    $("detailView").hidden = which !== "detail";
+    $("search").hidden = which !== "list";
+    $("backToList").hidden = which !== "detail";
+    var hasFriends = state.libraries.length > 1;
+    $("friendsBtn").hidden = !(which === "list" && state.view === "mine" && hasFriends);
+    $("mineBtn").hidden = !(which !== "detail" && state.view !== "mine");
+  }
+
+  function row(recipe) {
+    var r = el("div", "row");
+    if (recipe.thumb) {
+      var img = el("img"); img.src = recipe.thumb; img.alt = ""; img.loading = "lazy"; r.appendChild(img);
+    } else { r.appendChild(el("div", "ph")); }
+    r.appendChild(el("div", "t serif", recipe.title));
+    r.onclick = function () { openRecipe(recipe); };
+    return r;
+  }
+
+  function render() {
+    if (state.view === "friends") { renderFriends(); return; }
+    var lib = currentLibrary();
+    if (!lib) { return; }
+    $("title").textContent = lib.name;
+    var q = $("search").value.trim().toLowerCase();
+    var recipes = lib.recipes.filter(function (r) { return !q || r.search.indexOf(q) >= 0; });
+
+    var pinned = [];
+    if (lib.isMine && !q && state.pins.length) {
+      var byID = {};
+      lib.recipes.forEach(function (r) { byID[r.id] = r; });
+      pinned = state.pins.map(function (id) { return byID[id]; }).filter(Boolean);
+    }
+    $("pinnedWrap").hidden = !pinned.length;
+    var p = $("pinned"); p.innerHTML = "";
+    pinned.forEach(function (r) { p.appendChild(row(r)); });
+
+    var list = $("list"); list.innerHTML = "";
+    recipes.forEach(function (r) { list.appendChild(row(r)); });
+    if (!recipes.length) { list.appendChild(el("p", null, q ? "No recipes match your search." : "No recipes yet.")); }
+    show("list");
+  }
+
+  function renderFriends() {
+    $("title").textContent = "Friends' Recipes";
+    var box = $("friendsView"); box.innerHTML = "";
+    var friends = state.libraries.filter(function (l) { return !l.isMine; });
+    friends.forEach(function (f) {
+      var a = el("a", "serif", f.name);
+      a.onclick = function () { state.view = "friend"; state.friendKey = f.key; $("search").value = ""; render(); };
+      box.appendChild(a);
+    });
+    show("friends");
+  }
+
+  $("friendsBtn").onclick = function () {
+    var friends = state.libraries.filter(function (l) { return !l.isMine; });
+    $("search").value = "";
+    if (friends.length === 1) { state.view = "friend"; state.friendKey = friends[0].key; }
+    else { state.view = "friends"; }
+    render();
+  };
+  $("mineBtn").onclick = function () { state.view = "mine"; state.friendKey = null; $("search").value = ""; render(); };
+  $("backToList").onclick = function () { state.openRecipe = null; render(); window.scrollTo(0, 0); };
+  $("search").oninput = render;
+
+  function openRecipe(recipe) {
+    state.openRecipe = recipe;
+    var d = $("detailView"); d.innerHTML = "";
+    d.appendChild(el("h1", "serif", recipe.title));
+    d.appendChild(el("p", "meta", "Loading…"));
+    show("detail");
+    window.scrollTo(0, 0);
+
+    recipe.db.fetchRecords(
+      [{ recordName: recipe.snapshotName, zoneID: recipe.zoneID }, { recordName: recipe.recordName, zoneID: recipe.zoneID }],
+      { zoneID: recipe.zoneID }
+    ).then(function (res) {
+      if (res.hasErrors && !res.records.length) { throw res.errors[0]; }
+      var snap = null, rec = null;
+      res.records.forEach(function (r) {
+        if (r.recordType === "CD_Snapshot") { snap = r; } else if (r.recordType === "CD_Recipe") { rec = r; }
+      });
+      if (!snap) { throw new Error("recipe text not found"); }
+      return Promise.all([readJSON(snap, "CD_ingredientsData"), readJSON(snap, "CD_stepsData"), readJSON(snap, "CD_tipsData")])
+        .then(function (parts) { if (state.openRecipe === recipe) { renderDetail(recipe, snap, rec, parts[0], parts[1], parts[2]); } });
+    }).catch(function (e) {
+      if (state.openRecipe === recipe) { d.querySelector(".meta").textContent = "Couldn't open this recipe: " + errText(e); }
+    });
+  }
+
+  function renderSteps(container, steps, numbered) {
+    var ol = null;
+    (steps || []).forEach(function (s) {
+      var text = (s.text || "").trim();
+      if (!text) { return; }
+      if (s.isHeading) { ol = null; container.appendChild(el("h4", null, text)); return; }
+      if (s.isNote || !numbered) { ol = null; container.appendChild(el("div", "note", text)); return; }
+      if (!ol) { ol = el("ol", "steps"); container.appendChild(ol); }
+      ol.appendChild(el("li", null, text));
+    });
+  }
+
+  function renderDetail(recipe, snap, rec, ingredients, steps, tips) {
+    var d = $("detailView"); d.innerHTML = "";
+    var hero = rec && imageURL(rec, "CD_imageData");
+    if (hero) { var img = el("img", "hero"); img.src = hero; img.alt = ""; d.appendChild(img); }
+    d.appendChild(el("h1", "serif", field(snap, "CD_titleStorage") || recipe.title));
+
+    var servings = field(snap, "CD_servingsStorage");
+    if (servings > 0) { d.appendChild(el("p", "meta", "Serves " + servings)); }
+    var summary = field(snap, "CD_recipeSummaryStorage");
+    if (summary) { d.appendChild(el("p", null, summary)); }
+
+    var cols = el("div", "cols");
+    var left = el("div"), right = el("div");
+    left.appendChild(el("h3", "serif", "Ingredients"));
+    var ul = el("ul");
+    (ingredients || []).forEach(function (i) {
+      var t = (i.rawText || i.name || "").trim(); // same line the app shows (RecipeDetailView)
+      if (!t) { return; }
+      if (i.isSectionHeader) { left.appendChild(ul); ul = el("ul"); left.appendChild(el("h4", null, t)); }
+      else { ul.appendChild(el("li", null, t)); }
+    });
+    left.appendChild(ul);
+
+    right.appendChild(el("h3", "serif", "Directions"));
+    renderSteps(right, steps, true);
+    if (tips && tips.length) {
+      right.appendChild(el("h3", "serif", "Tips & Variations"));
+      renderSteps(right, tips, false);
+    }
+    cols.appendChild(left); cols.appendChild(right);
+    d.appendChild(cols);
   }
 }
+
 if (window.CloudKit) { start(); } else { window.addEventListener("cloudkitloaded", start); }
 </script>
 </body>
