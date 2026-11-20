@@ -32,7 +32,7 @@
 <h2 id="mine-h" hidden>My recipes</h2><ul id="mine"></ul>
 <h2 id="shared-h" hidden>Shared with me</h2><ul id="shared"></ul>
 
-<script src="https://cdn.apple-cloudkit.com/ck/2/CloudKit.js"></script>
+<script src="https://cdn.apple-cloudkit.com/ck/2/cloudkit.js"></script>
 <script>
 "use strict";
 
@@ -49,7 +49,7 @@ function showError(where, err) {
   say(where + ": " + msg, true);
 }
 
-window.addEventListener("cloudkitloaded", function () {
+function start() {
   CloudKit.configure({
     containers: [{
       containerIdentifier: "iCloud.com.jasonyohman.recipeapp",
@@ -139,7 +139,8 @@ window.addEventListener("cloudkitloaded", function () {
     document.getElementById(listId + "-h").hidden = false;
     return recipes.length;
   }
-});
+}
+if (window.CloudKit) { start(); } else { window.addEventListener("cloudkitloaded", start); }
 </script>
 </body>
 </html>
