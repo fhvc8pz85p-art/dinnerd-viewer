@@ -364,7 +364,10 @@ function start() {
       friends[owner].recipes = friends[owner].recipes.concat(recipes);
     });
     pins.sort(function (a, b) { return a.order - b.order; });
-    state.pins = pins.map(function (p) { return p.id; });
+    var seenPin = {};
+    state.pins = pins.map(function (p) { return p.id; }).filter(function (id) { // two devices may write the same pin
+      if (!id || seenPin[id]) { return false; } seenPin[id] = true; return true;
+    });
     state.libraries = [mine].concat(Object.keys(friends).map(function (k) { return friends[k]; })
       .filter(function (f) { return f.recipes.length; })
       .sort(function (a, b) { return a.name.localeCompare(b.name); }));
