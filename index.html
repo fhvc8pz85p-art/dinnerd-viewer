@@ -67,6 +67,10 @@
   .detail .meta { color: var(--text2); margin-bottom: 8px; }
   .cols { display: grid; grid-template-columns: minmax(260px, 1fr) 2fr; gap: 40px; }
   @media (max-width: 760px) { .cols { grid-template-columns: 1fr; gap: 0; } }
+  @media (min-width: 761px) {
+    .detail .cols { height: calc(var(--vh, 100vh) - var(--hdr, 90px) - 8px); }
+    .detail .cols > div { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 0 8px 48px 0; overscroll-behavior: contain; }
+  }
   .detail ul { list-style: none; padding: 0; margin: 0; }
   .detail li { padding: 8px 0; border-bottom: 1px solid var(--line); }
   .detail h3 { font-size: 24px; margin: 24px 0 8px; }
@@ -583,17 +587,17 @@ function start() {
 
   function renderDetail(recipe, snap, rec, ingredients, steps, tips) {
     var d = $("detailView"); d.innerHTML = "";
-    var hero = rec && imageURL(rec, "CD_imageData");
-    if (hero) { var img = el("img", "hero"); img.src = hero; img.alt = ""; d.appendChild(img); }
-    d.appendChild(el("h1", "serif", field(snap, "CD_titleStorage") || recipe.title));
-
-    var servings = field(snap, "CD_servingsStorage");
-    if (servings > 0) { d.appendChild(el("p", "meta", "Serves " + servings)); }
-    var summary = field(snap, "CD_recipeSummaryStorage");
-    if (summary) { d.appendChild(el("p", null, summary)); }
-
     var cols = el("div", "cols");
     var left = el("div"), right = el("div");
+    var hero = rec && imageURL(rec, "CD_imageData");
+    if (hero) { var img = el("img", "hero"); img.src = hero; img.alt = ""; left.appendChild(img); }
+    left.appendChild(el("h1", "serif", field(snap, "CD_titleStorage") || recipe.title));
+
+    var servings = field(snap, "CD_servingsStorage");
+    if (servings > 0) { left.appendChild(el("p", "meta", "Serves " + servings)); }
+    var summary = field(snap, "CD_recipeSummaryStorage");
+    if (summary) { left.appendChild(el("p", null, summary)); }
+
     left.appendChild(el("h3", "serif", "Ingredients"));
     var ul = el("ul");
     (ingredients || []).forEach(function (i) {
@@ -612,8 +616,18 @@ function start() {
     }
     cols.appendChild(left); cols.appendChild(right);
     d.appendChild(cols);
+    measure();
   }
 }
+
+function measure() {
+  var root = document.documentElement;
+  root.style.setProperty("--vh", window.innerHeight + "px");
+  root.style.setProperty("--hdr", document.querySelector("header").offsetHeight + "px");
+}
+window.addEventListener("resize", measure);
+window.addEventListener("orientationchange", function () { setTimeout(measure, 300); });
+measure();
 
 if (window.CloudKit) { start(); } else { window.addEventListener("cloudkitloaded", start); }
 </script>
